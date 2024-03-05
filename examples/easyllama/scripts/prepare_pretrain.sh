@@ -1,0 +1,1 @@
+python data/prepare_pretrain.py config/prepare_datasets.py

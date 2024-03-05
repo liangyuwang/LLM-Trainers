@@ -1,0 +1,1 @@
+python data/prepare_instruction.py config/prepare_datasets.py

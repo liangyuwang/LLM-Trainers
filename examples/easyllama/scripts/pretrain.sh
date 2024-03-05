@@ -1,0 +1,1 @@
+python core/pretrain.py config/pretrain.py

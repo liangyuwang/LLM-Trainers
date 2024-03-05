@@ -1,0 +1,1 @@
+torchrun --standalone --nproc_per_node=4 core/instruct.py config/instruct.py
