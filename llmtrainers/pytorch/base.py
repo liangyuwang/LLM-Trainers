@@ -203,12 +203,6 @@ class Trainer:
         self.state.max_steps = max_steps
         self.state.num_train_epochs = num_train_epochs
 
-        # for inputs in iter(self.train_dataset):
-        #     print("check inputs: ", inputs.keys(), len(inputs['input_ids']))
-        # print("check train_dataloader 1: ", type(train_dataloader), len(train_dataloader))
-        # print("check train_dataloader 2: ", train_dataloader.dataset[0])
-        # exit()
-
         eval_loss = 0.0
         tqdm_bar = nullcontext()
         if not self.args.disable_tqdm:
