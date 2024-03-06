@@ -1,4 +1,5 @@
 import os
+import inspect
 from packaging import version
 from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Sequence
@@ -153,6 +154,16 @@ class Trainer(DDPTrainer, BaseTrainer):
         """
             Layer pipeline is a suitable pipeline strategy for transformers models,
         """
+        # Check if the args in all_modules are valid
+        model_signature = self._get_signature_columns_if_needed(model)
+        for module_name in all_modules:
+            if not has_nested_attr(model, module_name):
+                raise AttributeError(f"Model does not have attribute {module_name}")
+            module = get_nested_attr(model, module_name)
+            module_signature = self._get_signature_columns_if_needed(module)
+            if module_signature != model_signature:
+                raise ValueError(f"Module {module_name} signature {module_signature} does not match the model signature {model_signature}")
+
         def layer_pipeline(model, layers_name):
             layer_pipeline_stages = []
             layers = get_nested_attr(model, layers_name)
@@ -168,8 +179,6 @@ class Trainer(DDPTrainer, BaseTrainer):
 
         pipeline_stages = []
         for module_name in all_modules:
-            if not has_nested_attr(model, module_name):
-                raise AttributeError(f"Model does not have attribute {module_name}")
             if module_name == layers_name:
                 pipeline_stages + layer_pipeline(model, module_name)
             else:
@@ -199,6 +208,13 @@ class Trainer(DDPTrainer, BaseTrainer):
         else:
             if self.master_process:
                 print("The provided model is not a Pipe instance.")
+
+    def _get_signature_columns_if_needed(self, module):
+        if _is_peft_model(module):
+            module = module.get_base_model()
+        signature = inspect.signature(module.forward)
+        return list(signature.parameters.keys())
+    
 
 
     def _unwrap_model(self, model):
