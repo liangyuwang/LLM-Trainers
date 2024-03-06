@@ -130,7 +130,7 @@ class Trainer(DDPTrainer, BaseTrainer):
             Layer pipeline is a suitable pipeline parallelism strategy for transformers models.
             (Reminder, the default transformers model is not valid here. You have to modify the modules forward args to pass the folllowing signature check.)
         """
-        # Check if the args in all_modules are valid
+        # Check if the forward args in all_modules are valid
         model_signature = self._get_signature_columns_if_needed(model)
         for module_name in all_modules:
             if not has_nested_attr(model, module_name):
