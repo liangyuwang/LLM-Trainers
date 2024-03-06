@@ -1,20 +1,29 @@
 import os
+from packaging import version
+from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Sequence
 
 import torch
+from torch.utils.data import DataLoader
 import torch.distributed as dist
 from torch.distributed import rpc
 from torch.nn.modules.module import Module
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.pipeline.sync import Pipe
 
+import datasets
 from datasets import Dataset
+from transformers.file_utils import is_datasets_available
 from transformers.data.data_collator import DataCollator
-from transformers import modeling_utils
+from transformers import training_args, modeling_utils, logging
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.modeling_utils import PreTrainedModel
+from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
+from transformers.trainer_utils import RemoveColumnsCollator, seed_worker
+from transformers.utils import find_labels
 
 from . import BaseTrainer, DDPTrainer
+from .base import _is_peft_model
 from .training_args import TrainingArguments
 from .utils import time_test, get_nested_attr, set_nested_attr, has_nested_attr
 
@@ -23,6 +32,8 @@ from .utils import time_test, get_nested_attr, set_nested_attr, has_nested_attr
 #     from pippy import Pipe, PipeSplitWrapper, annotate_split_points, PipelineStage
 # except:
 #     raise ImportError(f"The pippy package is required but not installed, please access the repo: https://github.com/pytorch/PiPPy/ to install")
+
+logger = logging.get_logger(__name__)
 
 
 class Trainer(DDPTrainer, BaseTrainer):
@@ -44,9 +55,19 @@ class Trainer(DDPTrainer, BaseTrainer):
         
         # distributed settings
         self.pipeline = args.pipe
+        if self.pipeline:
+            self.distributed = args.parallel_mode == training_args.ParallelMode.DISTRIBUTED
+            self.model = model
+            default_label_names = find_labels(self.model.__class__)
+            self.label_names = default_label_names if args.label_names is None else args.label_names
+            self._signature_columns = None
+            self._set_signature_columns_if_needed()
+            _signature_columns = self._signature_columns
 
         # Call the constructor of the base class
         super().__init__(model, args, data_collator, train_dataset, eval_dataset, tokenizer, optimizers, **kwargs)
+
+        self._signature_columns = _signature_columns
 
     @time_test
     def training_micro_step(self, train_dataloader, model, optimizer, scaler, autocast):
@@ -190,3 +211,187 @@ class Trainer(DDPTrainer, BaseTrainer):
         ):
             model = model.module
         return model
+
+    def _wrap_data(self, data):
+        """
+            Wrap the data
+        """
+        ordered_data = OrderedDict()
+        for k, v in data.items():
+            ordered_data[k] = v.to(device=self.args.device) if v is not None else None
+        return ordered_data
+    
+
+    # The following methods are copied from Huggingface's Trainer class, related to training and evaluation
+
+    def compute_loss(self, model, inputs, return_outputs=False):
+        """
+        See `transformers.Trainer.compute_loss`:
+        How the loss is computed by Trainer. By default, all models return the loss in the first element.
+
+        Subclass and override for custom behavior.
+
+        You can also override this function in a subclass to support custom model input (for example, no 'input_id').
+        """
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+        outputs = model(*inputs.values())   # key step for pipeline parallelism
+        # Save past state if it exists
+        # TODO: this needs to be fixed and made cleaner later.
+        if self.args.past_index >= 0:
+            self._past = outputs[self.args.past_index]
+
+        if labels is not None:
+            if _is_peft_model(model):
+                model_name = model.base_model.model._get_name()
+            else:
+                model_name = model._get_name()
+            if model_name in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
+                loss = self.label_smoother(outputs, labels, shift_labels=True)
+            else:
+                loss = self.label_smoother(outputs, labels)
+        else:
+            if isinstance(outputs, dict) and "loss" not in outputs:
+                raise ValueError(
+                    "The model did not return a loss from the inputs, only the following keys: "
+                    f"{','.join(outputs.keys())}. For reference, the inputs it received are {','.join(inputs.keys())}."
+                )
+            # We don't use .loss here since the model may return tuples instead of ModelOutput.
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        return (loss, outputs) if return_outputs else loss
+
+
+    
+    # The following methods are copied from Huggingface's Trainer class, related to data loading
+
+    def get_train_dataloader(self) -> DataLoader:
+        """
+        Returns the training [`~torch.utils.data.DataLoader`].
+
+        Will use no sampler if `train_dataset` does not implement `__len__`, a random sampler (adapted to distributed
+        training if necessary) otherwise.
+
+        Subclass and override this method if you want to inject some custom behavior.
+        """
+        if self.train_dataset is None:
+            raise ValueError("Trainer: training requires a train_dataset.")
+
+        train_dataset = self.train_dataset
+        data_collator = self.data_collator
+        
+        if is_datasets_available() and isinstance(train_dataset, datasets.Dataset):
+            train_dataset = self._remove_unused_columns(train_dataset, description="training")
+        else:
+            data_collator = self._get_collator_with_removed_columns(data_collator, description="training")
+        
+        data_collator = self._set_full_model_columns(data_collator)   # key step for pipeline parallelism
+
+        dataloader_params = {
+            "batch_size": self._train_batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+        }
+
+        if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+            dataloader_params["sampler"] = self._get_train_sampler()
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+            dataloader_params["worker_init_fn"] = seed_worker
+
+        return DataLoader(train_dataset, **dataloader_params)
+
+
+    def get_eval_dataloader(self, eval_dataset: Optional[Dataset] = None) -> DataLoader:
+        """
+        Returns the evaluation [`~torch.utils.data.DataLoader`].
+
+        Subclass and override this method if you want to inject some custom behavior.
+
+        Args:
+            eval_dataset (`torch.utils.data.Dataset`, *optional*):
+                If provided, will override `self.eval_dataset`. If it is a [`~datasets.Dataset`], columns not accepted
+                by the `model.forward()` method are automatically removed. It must implement `__len__`.
+        """
+        if eval_dataset is None and self.eval_dataset is None:
+            raise ValueError("Trainer: evaluation requires an eval_dataset.")
+        eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
+        data_collator = self.data_collator
+
+        if is_datasets_available() and isinstance(eval_dataset, datasets.Dataset):
+            eval_dataset = self._remove_unused_columns(eval_dataset, description="evaluation")
+        else:
+            data_collator = self._get_collator_with_removed_columns(data_collator, description="evaluation")
+
+        data_collator = self._set_full_model_columns(data_collator)   # key step for pipeline parallelism
+
+        dataloader_params = {
+            "batch_size": self.args.eval_batch_size,
+            "collate_fn": data_collator,
+            "num_workers": self.args.dataloader_num_workers,
+            "pin_memory": self.args.dataloader_pin_memory,
+            "persistent_workers": self.args.dataloader_persistent_workers,
+        }
+
+        if not isinstance(eval_dataset, torch.utils.data.IterableDataset):
+            dataloader_params["sampler"] = self._get_eval_sampler(eval_dataset)
+            dataloader_params["drop_last"] = self.args.dataloader_drop_last
+
+        return DataLoader(eval_dataset, **dataloader_params)
+    
+    def _remove_unused_columns(self, dataset: "datasets.Dataset", description: Optional[str] = None):
+        if not self.args.remove_unused_columns:
+            return dataset
+        # self._set_signature_columns_if_needed()   # key step for pipeline parallelism
+        signature_columns = self._signature_columns
+
+        ignored_columns = list(set(dataset.column_names) - set(signature_columns))
+        if len(ignored_columns) > 0:
+            dset_description = "" if description is None else f"in the {description} set"
+            logger.info(
+                f"The following columns {dset_description} don't have a corresponding argument in "
+                f"`{self.model.__class__.__name__}.forward` and have been ignored: {', '.join(ignored_columns)}."
+                f" If {', '.join(ignored_columns)} are not expected by `{self.model.__class__.__name__}.forward`, "
+                " you can safely ignore this message."
+            )
+
+        columns = [k for k in signature_columns if k in dataset.column_names]
+
+        if version.parse(datasets.__version__) < version.parse("1.4.0"):
+            dataset.set_format(
+                type=dataset.format["type"], columns=columns, format_kwargs=dataset.format["format_kwargs"]
+            )
+            return dataset
+        else:
+            return dataset.remove_columns(ignored_columns)
+
+    def _get_collator_with_removed_columns(
+        self, data_collator: Callable, description: Optional[str] = None
+    ) -> Callable:
+        """Wrap the data collator in a callable removing unused columns."""
+        if not self.args.remove_unused_columns:
+            return data_collator
+        # self._set_signature_columns_if_needed()   # key step for pipeline parallelism
+        signature_columns = self._signature_columns
+
+        remove_columns_collator = RemoveColumnsCollator(
+            data_collator=data_collator,
+            signature_columns=signature_columns,
+            logger=logger,
+            description=description,
+            model_name=self.model.__class__.__name__,
+        )
+        return remove_columns_collator
+
+
+    def _set_full_model_columns(self, data_collator: Callable) -> Callable:
+        def wrapper(batch):
+            batch = data_collator(batch)
+            ordered_batch = OrderedDict()
+            for key in self._signature_columns:
+                ordered_batch[key] = batch.get(key, None)
+            return ordered_batch
+        return wrapper
