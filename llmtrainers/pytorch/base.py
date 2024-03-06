@@ -418,9 +418,16 @@ class Trainer:
         with tqdm_bar as pbar:
             for _, inputs in enumerate(eval_dataloader):
                 inputs = self._wrap_data(inputs)
-                inner_eval_loss = self.compute_loss(model, inputs).mean()
+                inner_eval_loss = self._evaluate_step(model, inputs)
                 eval_loss = self._evaluate_update(pbar, eval_loss, inner_eval_loss.item())
         return eval_loss / len(eval_dataloader)
+    
+    @torch.no_grad()
+    def _evaluate_step(self, model, inputs):
+        """
+            Evaluate the model on the evaluation dataset. Used inside the training loop.
+        """
+        return self.compute_loss(model, inputs).mean()
     
     @torch.no_grad()
     def _evaluate_update(self, pbar, eval_loss, inner_eval_loss):
