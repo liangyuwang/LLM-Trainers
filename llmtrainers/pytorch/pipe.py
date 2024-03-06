@@ -211,7 +211,7 @@ class Trainer(DDPTrainer, BaseTrainer):
             labels = inputs.pop("labels")
         else:
             labels = None
-        outputs = model(*inputs.values())   # key step for pipeline parallelism
+        outputs = model(*inputs.values())   # key step for pipeline parallelism, the model missed all forward signature
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
         if self.args.past_index >= 0:
