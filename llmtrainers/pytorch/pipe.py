@@ -63,31 +63,14 @@ class Trainer(DDPTrainer, BaseTrainer):
             self.label_names = default_label_names if args.label_names is None else args.label_names
             self._signature_columns = None
             self._set_signature_columns_if_needed()
-            _signature_columns = self._signature_columns
+            _signature_columns = self._signature_columns    # after super()__init__, the model will be Pipe model and miss all forward signature
 
         # Call the constructor of the base class
         super().__init__(model, args, data_collator, train_dataset, eval_dataset, tokenizer, optimizers, **kwargs)
 
         self._signature_columns = _signature_columns
 
-    @time_test
-    def training_micro_step(self, train_dataloader, model, optimizer, scaler, autocast):
-        """
-        Perform a single training micro step.
-        """
-        loss_micro_accumulated = 0.0
-        for micro_step in range(self.args.gradient_accumulation_steps):
-            try:
-                inputs = next(train_dataloader)
-            except StopIteration:
-                break
-            inputs = self._wrap_data(inputs)
-            # If using ddp, only require backward grad sync on the last micro step
-            if self.distributed and not self.pipeline:
-                model.require_backward_grad_sync = (micro_step == self.args.gradient_accumulation_steps - 1)
-            loss_micro_accumulated += self.training_step(model, inputs, optimizer, scaler, autocast)
-        return loss_micro_accumulated / self.args.gradient_accumulation_steps
-    
+
     def _end_training(self):
         if self.distributed:
             dist.destroy_process_group()
@@ -112,7 +95,6 @@ class Trainer(DDPTrainer, BaseTrainer):
             master_process = True
         if self.pipeline:
             rpc.init_rpc(f"worker{int(os.environ['RANK'])}", rank=int(os.environ['RANK']), world_size=int(os.environ['WORLD_SIZE']))
-            # rpc.init_rpc(f"worker", rank=int(os.environ['RANK']), world_size=int(os.environ['WORLD_SIZE']))
         torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
         torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
         return master_process
@@ -146,13 +128,14 @@ class Trainer(DDPTrainer, BaseTrainer):
         self,
         model, 
         layers_name="model.layers", 
-        all_modules=["model.embed_tokens", "model.layers", "model.norm", "lm_head"], # copied from transformers.LlamaForCausalLM
+        all_modules=["model.embed_tokens", "model.layers", "model.norm", "lm_head"], # copied from transformers.LlamaForCausalLM, must be in order.
         splits=2, 
         chunks=8,
         rank=0,
     ):
         """
-            Layer pipeline is a suitable pipeline strategy for transformers models,
+            Layer pipeline is a suitable pipeline parallelism strategy for transformers models.
+            (Reminder, the default transformers model is not valid here. You have to modify the modules forward args to pass the folllowing signature check.)
         """
         # Check if the args in all_modules are valid
         model_signature = self._get_signature_columns_if_needed(model)
@@ -162,7 +145,7 @@ class Trainer(DDPTrainer, BaseTrainer):
             module = get_nested_attr(model, module_name)
             module_signature = self._get_signature_columns_if_needed(module)
             if module_signature != model_signature:
-                raise ValueError(f"Module {module_name} args names {module_signature} does not match the model args names {model_signature}")
+                raise ValueError(f"Module {module_name} forward args {module_signature} does not match the model forward args {model_signature}. Please rewrite your model to match the forward args names")
 
         def layer_pipeline(model, layers_name):
             layer_pipeline_stages = []
