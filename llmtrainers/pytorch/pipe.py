@@ -162,7 +162,7 @@ class Trainer(DDPTrainer, BaseTrainer):
             module = get_nested_attr(model, module_name)
             module_signature = self._get_signature_columns_if_needed(module)
             if module_signature != model_signature:
-                raise ValueError(f"Module {module_name} signature {module_signature} does not match the model signature {model_signature}")
+                raise ValueError(f"Module {module_name} args names {module_signature} does not match the model args names {model_signature}")
 
         def layer_pipeline(model, layers_name):
             layer_pipeline_stages = []
