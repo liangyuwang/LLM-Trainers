@@ -28,12 +28,6 @@ from .base import _is_peft_model
 from .training_args import TrainingArguments
 from .utils import time_test, get_nested_attr, set_nested_attr, has_nested_attr
 
-# try:
-#     import pippy
-#     from pippy import Pipe, PipeSplitWrapper, annotate_split_points, PipelineStage
-# except:
-#     raise ImportError(f"The pippy package is required but not installed, please access the repo: https://github.com/pytorch/PiPPy/ to install")
-
 logger = logging.get_logger(__name__)
 
 
@@ -120,7 +114,6 @@ class Trainer(DDPTrainer, BaseTrainer):
                         rank=int(os.environ['RANK']))
                 else:
                     raise NotImplementedError(f"Pipeline mode {self.args.pipe_config['mode']} is not implemented")
-            # self._print_pipeline_model_devices(model)
         return model
 
 
@@ -169,28 +162,11 @@ class Trainer(DDPTrainer, BaseTrainer):
                 pipeline_stages.append(get_nested_attr(model, module_name).to(device))
 
         model_blocks = torch.nn.Sequential(*pipeline_stages)
+        if self.master_process:
+            for module_name, module in zip(all_modules, model_blocks):
+                print(f"  Module {module_name} on {next(module.parameters()).device}")
         pipeline_model = Pipe(model_blocks, chunks=chunks)
         return pipeline_model
-
-    def _print_pipeline_model_devices(self, pipeline_model):
-        # Check if pipeline_model is an instance of Pipe
-        if isinstance(pipeline_model, Pipe):
-            # Iterate over each segment
-            for segment_idx, segment in enumerate(pipeline_model):
-                if self.master_process:
-                    print(f"Segment {segment_idx}:")
-                # Each segment is a tuple of (stage, batch)
-                stage, _ = segment
-                # Iterate over modules in the stage
-                for module_idx, module in enumerate(stage.modules()):
-                    # Avoid printing wrapper modules like Pipe itself
-                    if isinstance(module, (torch.nn.Sequential, torch.nn.ModuleList, Pipe)):
-                        continue
-                    if self.master_process:
-                        print(f"  Module {module_idx}: {module.__class__.__name__} on {next(module.parameters()).device}")
-        else:
-            if self.master_process:
-                print("The provided model is not a Pipe instance.")
 
     def _get_signature_columns_if_needed(self, module):
         if _is_peft_model(module):
@@ -198,7 +174,6 @@ class Trainer(DDPTrainer, BaseTrainer):
         signature = inspect.signature(module.forward)
         return list(signature.parameters.keys())
     
-
 
     def _unwrap_model(self, model):
         """
