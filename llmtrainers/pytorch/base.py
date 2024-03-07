@@ -155,8 +155,13 @@ class Trainer:
         # Other settings ...
         self._signature_columns = None
         self.last_checkpoint_folder = None
-        if self.master_process:
-            if not os.path.exists(self.args.output_dir):
+        if not self.args.overwrite_output_dir:
+            if os.listdir(self.args.output_dir):
+                exit(f"The save path {self.args.output_dir} is not empty, please clear the folder")
+        else:
+            if self.master_process:
+                if os.path.exists(self.args.output_dir):
+                    shutil.rmtree(self.args.output_dir)
                 os.makedirs(self.args.output_dir)
 
 
@@ -168,6 +173,8 @@ class Trainer:
         self.lr_scheduler = self.create_scheduler(num_training_steps=self.args.max_steps, optimizer=self.optimizer)
         self.autocast = self.create_autocast()
         self.scaler = self.create_scaler()
+        self.train_dataloader = self.get_train_dataloader()
+        self.eval_dataloader = self.get_eval_dataloader()
         # resume from checkpoint
         if resume_from_checkpoint is not None:
             self._load_from_checkpoint(resume_from_checkpoint)
@@ -195,8 +202,7 @@ class Trainer:
 
     def _inner_training_loop(self):
         model, optimizer, lr_scheduler, scaler, autocast = self.model, self.optimizer, self.lr_scheduler, self.scaler, self.autocast
-        train_dataloader = self.get_train_dataloader()
-        eval_dataloader = self.get_eval_dataloader()
+        train_dataloader, eval_dataloader = self.train_dataloader, self.eval_dataloader
         max_steps, num_train_epochs, num_update_steps_per_epoch, num_train_samples, num_train_tokens = self._training_args(train_dataloader)
         last_global_epoch = self.state.epoch
         last_global_step = self.state.global_step
@@ -207,9 +213,6 @@ class Trainer:
         tqdm_bar = nullcontext()
         if not self.args.disable_tqdm:
             tqdm_bar = tqdm(total=max_steps, initial=last_global_step, desc="Training")
-        if not self.args.overwrite_output_dir:
-            if os.listdir(self.args.output_dir):
-                exit(f"The save path {self.args.output_dir} is not empty, please clear the folder")
         with tqdm_bar as pbar:
             for epoch in range(num_train_epochs - int(last_global_epoch)):
                 if self.state.global_step > max_steps:
@@ -819,7 +822,6 @@ class Trainer:
         
         with self._rank_zero_first():   # execute the code in the zero process first
             if save and self.master_process and self.args.should_save:
-            # if save and self.master_process:
                 checkpoint_folder = os.path.join(out_dir, f'checkpoint-{self.state.global_step+1}')
                 if self.master_process:
                     if not os.path.exists(checkpoint_folder):
@@ -846,7 +848,7 @@ class Trainer:
                         shutil.rmtree(os.path.join(self.args.output_dir, step_checkpoints[0]))
                 
                 self.last_checkpoint_folder = checkpoint_folder
-    
+
     def _save_checkpoint(self, checkpoint_folder, raw_model, optimizer, lr_scheduler, scaler, train_loss, eval_loss):
         # Save model checkpoint
         self._save_model(checkpoint_folder, raw_model)

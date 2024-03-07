@@ -28,6 +28,12 @@ from .base import _is_peft_model
 from .training_args import TrainingArguments
 from .utils import time_test, get_nested_attr, set_nested_attr, has_nested_attr
 
+# try:
+#     import pippy
+#     from pippy import Pipe, PipeSplitWrapper, annotate_split_points, PipelineStage
+# except:
+#     raise ImportError(f"The pippy package is required but not installed, please access the repo: https://github.com/pytorch/PiPPy/ to install")
+
 logger = logging.get_logger(__name__)
 
 
@@ -211,7 +217,7 @@ class Trainer(DDPTrainer, BaseTrainer):
             labels = inputs.pop("labels")
         else:
             labels = None
-        outputs = model(*inputs.values())   # key step for pipeline parallelism, the model missed all forward signature
+        outputs = model(*inputs.values())   # key step for pipeline parallelism
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
         if self.args.past_index >= 0:
