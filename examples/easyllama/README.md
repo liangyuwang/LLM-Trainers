@@ -7,6 +7,7 @@ bash scripts/prepare_pretrain.sh
 ```
 to create the pretrain dataset, and run:
 ```shell
+cd examples/easyllama/
 bash scripts/pretrain_ddp.sh
 ```
 to pretrain the llama model.
