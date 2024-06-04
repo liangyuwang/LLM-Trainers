@@ -10,6 +10,6 @@ Simple-LLM-Trainers is a lightweight, versatile, and user-friendly collection of
 
 ## Current Implementation
 1. BaseTrainer: CPU, single GPU, and Data Parallel training.
-2. DDPTrainer: Distributed Data Parallel training.
-3. PipeTrainer:
-4. FSDPTrainer:
+2. DDPTrainer: Distributed Data Parallel training cross GPUs.
+3. PipeTrainer: Pipeline parallelism within a single node.
+4. FSDPTrainer: Zero3 cross GPUs.
